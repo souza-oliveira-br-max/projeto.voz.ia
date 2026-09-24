@@ -127,6 +127,24 @@
             box-shadow: 0 0 10px rgba(0,255,136,0.5);
         }
 
+        /* Painel de contexto (localização + quem fala) */
+        .contexto-info {
+            position: absolute;
+            bottom: 15px; right: 15px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            font-size: 11px;
+            line-height: 1.6;
+            min-width: 180px;
+        }
+        .contexto-info .linha {
+            display: flex; justify-content: space-between; gap: 12px;
+        }
+        .contexto-info .label { color: rgba(0,255,136,0.4); }
+        .contexto-info .valor { color: var(--text); font-weight: 600; }
+
         .arion-panel {
             background: var(--bg2); border: 1px solid var(--border);
             border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;
@@ -213,6 +231,7 @@
         .modal-arion-content {
             background: var(--bg2); border: 1px solid var(--border);
             border-radius: 16px; padding: 30px; max-width: 500px; width: 100%;
+            max-height: 80vh; overflow-y: auto;
         }
         .modal-arion-content h3 { color: var(--text); margin-bottom: 20px; font-size: 18px; }
         .config-item { margin-bottom: 20px; }
@@ -225,6 +244,29 @@
             width: 100%; background: rgba(0,0,0,0.5);
             border: 1px solid var(--border); color: var(--text);
             padding: 10px 14px; border-radius: 10px; font-size: 14px;
+        }
+        .config-locais {
+            display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+        }
+        .config-locais button {
+            background: rgba(0,255,136,0.05);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .config-locais button:hover {
+            background: rgba(0,255,136,0.15);
+            border-color: var(--text);
+        }
+        .lista-perfis {
+            font-size: 11px;
+            color: rgba(0,255,136,0.5);
+            margin-top: 8px;
+            line-height: 1.6;
         }
         .btn-fechar {
             background: var(--grad); color: #000; border: none;
@@ -271,6 +313,10 @@
                     <div class="mic-bar" id="micBar"></div>
                 </div>
             </div>
+            <div class="contexto-info">
+                <div class="linha"><span class="label">Local:</span><span class="valor" id="infoLocal">—</span></div>
+                <div class="linha"><span class="label">Voz:</span><span class="valor" id="infoVoz">—</span></div>
+            </div>
         </div>
 
         <div class="arion-panel">
@@ -315,6 +361,21 @@
                 <label>Palavra de ativação</label>
                 <input type="text" id="cfgWakeWord" value="arion" placeholder="ex: arion">
             </div>
+            <div class="config-item">
+                <label>Local atual (detectado: <span id="cfgLocalAtual">—</span>)</label>
+                <div class="config-locais">
+                    <button onclick="rotularLocal('casa')">🏠 Rotular como Casa</button>
+                    <button onclick="rotularLocal('trabalho')">💼 Rotular como Trabalho</button>
+                </div>
+                <div class="lista-perfis" id="listaPerfis"></div>
+            </div>
+            <div class="config-item">
+                <label>Perfis de voz salvos</label>
+                <div class="config-locais">
+                    <button onclick="registrarVoz('Souza')">🎙️ Registrar Souza</button>
+                </div>
+                <div class="lista-perfis" id="listaVozes"></div>
+            </div>
             <button class="btn-fechar" onclick="fecharConfig()">FECHAR</button>
         </div>
     </div>
@@ -325,6 +386,8 @@
     <script src="vad.js"></script>
     <script src="memoria.js"></script>
     <script src="transcritor.js"></script>
+    <script src="voz-identidade.js"></script>
+    <script src="localizador.js"></script>
 
     <script>
     // ============================================================
@@ -611,8 +674,10 @@
         constructor() {
             this.ouvido = null; this.voz = null; this.olho = null;
             this.vad = null; this.memoria = null; this.micMeter = null;
-            this.transcritor = null;
+            this.transcritor = null; this.vozId = null; this.localizador = null;
             this.ativo = false;
+            this.localAtual = null;
+            this.quemFala = null;
         }
 
         async iniciar() {
@@ -639,7 +704,7 @@
                 ArionUI.atualizarStatus('ouvido', true);
             }
 
-            // Transcritor (Gemini) — a forma principal
+            // Transcritor (Gemini)
             try {
                 this.transcritor = new Transcritor({ debug: true });
                 await this.transcritor.iniciar(texto => {
@@ -650,7 +715,30 @@
                 });
             } catch(e) { console.warn('⚠️ Transcritor não iniciou:', e); }
 
-            // VAD — full-duplex + dispara a gravação
+            // VozIdentidade
+            try {
+                this.vozId = new VozIdentidade({ debug: true });
+                await this.vozId.iniciar();
+            } catch(e) { console.warn('⚠️ VozIdentidade não iniciou:', e); }
+
+            // Localizador
+            try {
+                this.localizador = new Localizador({ debug: true });
+                await this.localizador.iniciar();
+                const onde = await this.localizador.identificar();
+                this.localAtual = onde.local;
+                document.getElementById('infoLocal').textContent = onde.local;
+                console.log('📍 Local:', onde.local, `(${Math.round(onde.confianca * 100)}%)`);
+
+                // Monitora mudanças de rede
+                this.localizador.monitorar((novo, anterior) => {
+                    this.localAtual = novo.local;
+                    document.getElementById('infoLocal').textContent = novo.local;
+                    this.responder(`Mudou de ${anterior} para ${novo.local}.`);
+                }, 60000);
+            } catch(e) { console.warn('⚠️ Localizador não iniciou:', e); }
+
+            // VAD
             try {
                 this.vad = new VAD({ debug: true });
                 await this.vad.iniciar(
@@ -667,6 +755,7 @@
                 );
             } catch(e) { console.warn('⚠️ VAD não iniciou:', e); }
 
+            // MicMeter
             try {
                 this.micMeter = new MicMeter();
                 await this.micMeter.iniciar();
@@ -676,11 +765,24 @@
             ARION.ativo = true;
 
             setTimeout(() => {
-                const saudacao = this.memoria.gerarSaudacao();
+                const saudacao = this._gerarSaudacaoContextual();
                 this.voz.falar(saudacao);
                 ArionUI.adicionarMensagem('arion', saudacao);
                 this.memoria.adicionarMensagem('arion', saudacao);
             }, 500);
+        }
+
+        _gerarSaudacaoContextual() {
+            const base = this.memoria.gerarSaudacao();
+            if (!this.localAtual || this.localAtual === 'desconhecido') return base;
+
+            const prefixo = this.localAtual === 'casa'
+                ? 'Você tá em casa. '
+                : this.localAtual === 'trabalho'
+                ? 'Você tá no trabalho. '
+                : '';
+
+            return prefixo + base;
         }
 
         async pensar(mensagem) {
@@ -692,10 +794,22 @@
             try {
                 const historico = this.memoria.getHistorico(10);
                 const identidade = this.memoria.getIdentidade();
+
+                // Adiciona contexto (local + quem fala)
+                const contexto = {
+                    local: this.localAtual,
+                    quemFala: this.quemFala
+                };
+
                 const resp = await fetch(ARION_CHAT_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mensagem, historico, identidade })
+                    body: JSON.stringify({
+                        mensagem,
+                        historico,
+                        identidade,
+                        contexto
+                    })
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
@@ -726,6 +840,18 @@
                 if (n === 0) return this.responder('Não vejo ninguém no momento.');
                 if (n === 1) return this.responder('Vejo uma pessoa.');
                 return this.responder(`Vejo ${n} pessoas.`);
+            }
+            if (/onde (eu )?(estou|tô)|que lugar/i.test(semWake)) {
+                if (this.localAtual && this.localAtual !== 'desconhecido') {
+                    return this.responder(`Você tá em ${this.localAtual}.`);
+                }
+                return this.responder('Ainda não sei onde você tá.');
+            }
+            if (/quem (est[áa]|t[áa]) falando|reconhece (minha|essa) voz/i.test(semWake)) {
+                if (this.quemFala) {
+                    return this.responder(`Reconheço: ${this.quemFala.nome || this.quemFala.categoria}.`);
+                }
+                return this.responder('Ainda não identifiquei a voz.');
             }
             if (/liga(r)? (a )?c[âa]mera/i.test(semWake)) {
                 if (!this.olho.ligado) { this.olho.iniciar(); return this.responder('Câmera ligada.'); }
@@ -760,6 +886,21 @@
             ArionUI.adicionarMensagem('arion', texto);
             this.memoria.adicionarMensagem('arion', texto);
             if (ARION.vozLigada && this.voz) this.voz.falar(texto);
+        }
+
+        // Identifica quem fala a partir de uma amostra de áudio
+        async identificarQuemFala() {
+            if (!this.vozId) return null;
+            try {
+                const r = await this.vozId.identificar(3000);
+                this.quemFala = r;
+                document.getElementById('infoVoz').textContent = r.nome || r.categoria || '—';
+                console.log('🎤 Quem fala:', r);
+                return r;
+            } catch(e) {
+                console.warn('⚠️ Erro ao identificar voz:', e);
+                return null;
+            }
         }
     }
 
@@ -851,7 +992,6 @@
                 this.audioContext = null;
             }
             if (this.barra) this.barra.style.width = '0%';
-            console.log('🎚️ MicMeter parado');
         }
     }
 
@@ -950,6 +1090,9 @@
         });
     });
 
+    // ============================================================
+    // FUNÇÕES GLOBAIS (chamadas pelo modal)
+    // ============================================================
     function abrirConfig() {
         document.getElementById('modalConfig').classList.add('open');
         if (arion && arion.voz) arion.voz.carregarVozes();
@@ -957,6 +1100,28 @@
         document.getElementById('cfgVelocidade').value = cfg.velocidade || 1;
         document.getElementById('cfgTom').value = cfg.tom || 1;
         document.getElementById('cfgWakeWord').value = cfg.wakeWord || 'arion';
+
+        // Atualiza o local detectado
+        const localEl = document.getElementById('cfgLocalAtual');
+        if (localEl && arion?.localAtual) localEl.textContent = arion.localAtual;
+
+        // Lista os locais salvos
+        if (arion?.localizador) {
+            const perfis = arion.localizador.listar();
+            const listaEl = document.getElementById('listaPerfis');
+            listaEl.innerHTML = perfis.length
+                ? perfis.map(p => `• ${p.nome} — ${p.ip} (${p.vezesVisto}×)`).join('<br>')
+                : 'Nenhum local rotulado.';
+        }
+
+        // Lista as vozes salvas
+        if (arion?.vozId) {
+            const vozes = arion.vozId.listar();
+            const listaEl = document.getElementById('listaVozes');
+            listaEl.innerHTML = vozes.length
+                ? vozes.map(v => `• ${v.nome} (${v.categoria})`).join('<br>')
+                : 'Nenhuma voz registrada.';
+        }
     }
 
     function fecharConfig() {
@@ -976,8 +1141,32 @@
         }
     }
 
+    async function rotularLocal(nome) {
+        if (!arion || !arion.localizador) {
+            alert('O Arion precisa estar iniciado.');
+            return;
+        }
+        await arion.localizador.iniciar();
+        arion.localizador.rotular(nome);
+        alert(`Local "${nome}" rotulado com sucesso!`);
+        abrirConfig();
+    }
+
+    async function registrarVoz(nome) {
+        if (!arion || !arion.vozId) {
+            alert('O Arion precisa estar iniciado.');
+            return;
+        }
+        alert(`Vai gravar 8 segundos da voz de "${nome}". Fale algo natural.`);
+        await arion.vozId.registrar(nome, 8);
+        alert(`Voz de "${nome}" registrada!`);
+        abrirConfig();
+    }
+
     window.fecharConfig = fecharConfig;
     window.abrirConfig = abrirConfig;
+    window.rotularLocal = rotularLocal;
+    window.registrarVoz = registrarVoz;
     </script>
 </body>
 </html>
