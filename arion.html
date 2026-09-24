@@ -89,6 +89,44 @@
         }
         .camera-info .label { color: rgba(0,255,136,0.4); }
         .camera-info .valor { color: var(--text); font-weight: 600; }
+
+        .mic-meter {
+            position: absolute;
+            bottom: 15px; left: 15px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        .mic-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: rgba(0,255,136,0.5);
+        }
+        .mic-bar-bg {
+            width: 150px;
+            height: 8px;
+            background: rgba(0,255,136,0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+        .mic-bar {
+            height: 100%;
+            width: 0%;
+            background: var(--grad);
+            border-radius: 4px;
+            transition: width 0.05s ease-out;
+            box-shadow: 0 0 10px rgba(0,255,136,0.5);
+        }
+
         .arion-panel {
             background: var(--bg2); border: 1px solid var(--border);
             border-radius: 16px; display: flex; flex-direction: column; overflow: hidden;
@@ -224,6 +262,15 @@
                 <div class="linha"><span class="label">Rostos:</span><span class="valor" id="infoFaces">0</span></div>
                 <div class="linha"><span class="label">Modo:</span><span class="valor" id="infoModo">aguardando</span></div>
             </div>
+            <div class="mic-meter">
+                <div class="mic-label">
+                    <i class="fas fa-microphone"></i>
+                    <span>MIC</span>
+                </div>
+                <div class="mic-bar-bg">
+                    <div class="mic-bar" id="micBar"></div>
+                </div>
+            </div>
         </div>
 
         <div class="arion-panel">
@@ -277,6 +324,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
     <script src="vad.js"></script>
     <script src="memoria.js"></script>
+    <script src="transcritor.js"></script>
 
     <script>
     // ============================================================
@@ -304,7 +352,7 @@
         }
     };
 
-    // ---------- MÓDULO 1 — OUVIDO ----------
+    // ---------- MÓDULO 1 — OUVIDO (legado) ----------
     class Ouvido {
         constructor() {
             const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -316,12 +364,17 @@
             this.rec.maxAlternatives = 1;
             this.ouvindo = false;
             this.callbackFinal = null;
+            this.callbackInterim = null;
             this.rec.onresult = (e) => {
                 let final = '';
+                let interim = '';
                 for (let i = e.resultIndex; i < e.results.length; i++) {
-                    if (e.results[i].isFinal) final += e.results[i][0].transcript;
+                    const txt = e.results[i][0].transcript;
+                    if (e.results[i].isFinal) final += txt;
+                    else interim += txt;
                 }
                 if (final && this.callbackFinal) this.callbackFinal(final.trim());
+                if (interim && this.callbackInterim) this.callbackInterim(interim.trim());
             };
             this.rec.onerror = (e) => {
                 if (e.error === 'not-allowed') {
@@ -332,9 +385,10 @@
                 if (this.ouvindo) { try { this.rec.start(); } catch(e) {} }
             };
         }
-        iniciar(callback) {
+        iniciar(callbackFinal, callbackInterim) {
             if (!this.rec) return false;
-            this.callbackFinal = callback;
+            this.callbackFinal = callbackFinal;
+            this.callbackInterim = callbackInterim || null;
             this.ouvindo = true;
             try { this.rec.start(); } catch(e) {}
             return true;
@@ -424,19 +478,26 @@
                 this.ligado = true;
             } catch(e) { console.error('❌ Erro câmera:', e); return false; }
             try {
-                const vision = await FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
-                );
-                this.landmarker = await FaceLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-                        delegate: "GPU"
-                    },
-                    runningMode: "VIDEO", numFaces: 5
-                });
+                if (typeof FilesetResolver === 'undefined') {
+                    console.warn('⚠️ MediaPipe não carregou');
+                } else {
+                    const vision = await FilesetResolver.forVisionTasks(
+                        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+                    );
+                    this.landmarker = await FaceLandmarker.createFromOptions(vision, {
+                        baseOptions: {
+                            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                            delegate: "GPU"
+                        },
+                        runningMode: "VIDEO", numFaces: 5
+                    });
+                }
             } catch(e) { console.warn('⚠️ MediaPipe falhou:', e); }
-            try { this.detector = await cocoSsd.load({ base: 'mobilenet_v2' }); }
-            catch(e) { console.warn('⚠️ COCO-SSD falhou:', e); }
+            try {
+                if (typeof cocoSsd !== 'undefined') {
+                    this.detector = await cocoSsd.load({ base: 'mobilenet_v2' });
+                }
+            } catch(e) { console.warn('⚠️ COCO-SSD falhou:', e); }
             this.loopDeteccao();
             ArionUI.atualizarStatus('olho', true);
             return true;
@@ -549,7 +610,8 @@
     class ArionCore {
         constructor() {
             this.ouvido = null; this.voz = null; this.olho = null;
-            this.vad = null; this.memoria = null;
+            this.vad = null; this.memoria = null; this.micMeter = null;
+            this.transcritor = null;
             this.ativo = false;
         }
 
@@ -570,10 +632,25 @@
             }
 
             if (this.ouvido && this.ouvido.rec) {
-                this.ouvido.iniciar(texto => this.processarFala(texto));
+                this.ouvido.iniciar(
+                    texto => this.processarFala(texto),
+                    texto => console.log('🎤 interim:', texto)
+                );
                 ArionUI.atualizarStatus('ouvido', true);
             }
 
+            // Transcritor (Gemini) — a forma principal
+            try {
+                this.transcritor = new Transcritor({ debug: true });
+                await this.transcritor.iniciar(texto => {
+                    if (texto && texto.length > 1) {
+                        console.log('📝 Transcrito:', texto);
+                        this.processarFala(texto);
+                    }
+                });
+            } catch(e) { console.warn('⚠️ Transcritor não iniciou:', e); }
+
+            // VAD — full-duplex + dispara a gravação
             try {
                 this.vad = new VAD({ debug: true });
                 await this.vad.iniciar(
@@ -582,10 +659,18 @@
                             speechSynthesis.cancel();
                             console.log('🤫 Arion interrompido pelo usuário');
                         }
+                        if (this.transcritor) this.transcritor.comecarGravacao();
                     },
-                    () => {}
+                    () => {
+                        if (this.transcritor) this.transcritor.pararGravacao();
+                    }
                 );
-            } catch(e) { console.warn('⚠️ VAD não iniciou (sem mic?):', e); }
+            } catch(e) { console.warn('⚠️ VAD não iniciou:', e); }
+
+            try {
+                this.micMeter = new MicMeter();
+                await this.micMeter.iniciar();
+            } catch(e) { console.warn('⚠️ MicMeter não iniciou:', e); }
 
             this.ativo = true;
             ARION.ativo = true;
@@ -598,34 +683,24 @@
             }, 500);
         }
 
-        // ============================================================
-        // PENSAR — chama o Gemini via Edge Function
-        // ============================================================
         async pensar(mensagem) {
             if (ARION.pensando) return;
             ARION.pensando = true;
-
-            // Indicador visual de "pensando"
             const statusVoz = document.getElementById('statusVoz');
             statusVoz.className = 'status-badge thinking';
             statusVoz.innerHTML = '<i class="fas fa-brain"></i> PENSANDO';
-
             try {
                 const historico = this.memoria.getHistorico(10);
                 const identidade = this.memoria.getIdentidade();
-
                 const resp = await fetch(ARION_CHAT_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mensagem, historico, identidade })
                 });
-
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
                 const resposta = data?.resposta || 'Não consegui pensar agora.';
-
                 this.responder(resposta);
-
             } catch (e) {
                 console.error('❌ Gemini erro:', e);
                 this.responder('Tive um problema pra pensar agora. Tenta de novo?');
@@ -643,7 +718,6 @@
             const lower = texto.toLowerCase();
             const semWake = lower.replace(new RegExp(`^${ARION.wakeWord}[,\\s]*`), '');
 
-            // -------- Comandos LOCAIS (instantâneos, sem nuvem) --------
             if (/o que (você )?v[êe]|descrev|olha (pra|para)|o que tem/i.test(semWake)) {
                 return this.responder(this.olho.descreverCena());
             }
@@ -675,7 +749,6 @@
                 return this.responder('Eu sou Arion. Fui criado para te ver, te ouvir e te ajudar.');
             }
 
-            // -------- Qualquer outra coisa: MANDA PRA IA --------
             this.pensar(texto);
         }
 
@@ -713,6 +786,75 @@
         }
     };
 
+    // ---------- MÓDULO 6 — MEDIDOR DE SINAL DO MICROFONE ----------
+    class MicMeter {
+        constructor() {
+            this.audioContext = null;
+            this.analyser = null;
+            this.stream = null;
+            this.rodando = false;
+            this.barra = document.getElementById('micBar');
+            this.picoSuavizado = 0;
+        }
+        async iniciar() {
+            try {
+                this.stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = this.audioContext.createMediaStreamSource(this.stream);
+                this.analyser = this.audioContext.createAnalyser();
+                this.analyser.fftSize = 512;
+                source.connect(this.analyser);
+                this.rodando = true;
+                this._loop();
+                console.log('🎚️ MicMeter iniciado');
+                return true;
+            } catch(e) {
+                console.error('❌ MicMeter erro:', e);
+                return false;
+            }
+        }
+        _loop() {
+            if (!this.rodando) return;
+            const buffer = new Uint8Array(this.analyser.fftSize);
+            this.analyser.getByteTimeDomainData(buffer);
+            let soma = 0;
+            for (let i = 0; i < buffer.length; i++) {
+                const v = (buffer[i] - 128) / 128;
+                soma += v * v;
+            }
+            const rms = Math.sqrt(soma / buffer.length);
+            const nivel = Math.min(100, rms * 300);
+            if (nivel > this.picoSuavizado) {
+                this.picoSuavizado = nivel;
+            } else {
+                this.picoSuavizado = this.picoSuavizado * 0.85 + nivel * 0.15;
+            }
+            if (this.barra) {
+                this.barra.style.width = this.picoSuavizado + '%';
+            }
+            requestAnimationFrame(() => this._loop());
+        }
+        parar() {
+            this.rodando = false;
+            if (this.stream) {
+                this.stream.getTracks().forEach(t => t.stop());
+                this.stream = null;
+            }
+            if (this.audioContext) {
+                this.audioContext.close();
+                this.audioContext = null;
+            }
+            if (this.barra) this.barra.style.width = '0%';
+            console.log('🎚️ MicMeter parado');
+        }
+    }
+
     function traduzirClasse(classe) {
         const map = {
             'person': 'pessoa', 'car': 'carro', 'motorcycle': 'moto', 'bus': 'ônibus',
@@ -746,17 +888,37 @@
         });
 
         document.getElementById('btnMicrofone').addEventListener('click', (e) => {
-            if (!arion || !arion.ouvido) return;
-            if (arion.ouvido.ouvindo) {
-                arion.ouvido.parar();
+            if (!arion) return;
+            const ligado = e.currentTarget.classList.contains('on');
+            if (ligado) {
+                if (arion.ouvido) arion.ouvido.parar();
                 if (arion.vad) arion.vad.parar();
+                if (arion.micMeter) arion.micMeter.parar();
+                if (arion.transcritor) arion.transcritor.parar();
                 e.currentTarget.classList.remove('on');
                 ArionUI.atualizarStatus('ouvido', false);
             } else {
-                arion.ouvido.iniciar(texto => arion.processarFala(texto));
-                if (arion.vad) arion.vad.iniciar(() => {
-                    if (speechSynthesis.speaking) speechSynthesis.cancel();
-                });
+                if (arion.ouvido) arion.ouvido.iniciar(
+                    texto => arion.processarFala(texto),
+                    texto => console.log('🎤 interim:', texto)
+                );
+                if (arion.transcritor) {
+                    arion.transcritor.iniciar(texto => {
+                        if (texto && texto.length > 1) arion.processarFala(texto);
+                    });
+                }
+                if (arion.vad) {
+                    arion.vad.iniciar(
+                        () => {
+                            if (speechSynthesis.speaking) speechSynthesis.cancel();
+                            if (arion.transcritor) arion.transcritor.comecarGravacao();
+                        },
+                        () => {
+                            if (arion.transcritor) arion.transcritor.pararGravacao();
+                        }
+                    );
+                }
+                if (arion.micMeter) arion.micMeter.iniciar();
                 e.currentTarget.classList.add('on');
                 ArionUI.atualizarStatus('ouvido', true);
             }
